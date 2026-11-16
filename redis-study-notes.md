@@ -1,6 +1,6 @@
 # Redis 학습 노트
 
-정리일 2026-11-13 · Week11-12 AI 활용
+Week11-12 AI 활용 · 개념 정리 2026-11-13 · 구현 내용 추가
 
 Redis가 생긴 이유와 캐시 동작을 이해하고, 미니 DBMS를 만든 뒤 Redis를 연결하는 흐름을 정리한다.
 
@@ -67,26 +67,33 @@ Redis → 명령과 인자 해석 → RAM의 값 읽기 또는 변경 → RESP�
 
 RDB와 AOF를 함께 쓸 수 있다. 저장 대상의 크기는 메모리 용량을 고려하고, 장애 시 어느 시점까지 복원되는지는 디스크 저장 설정에 따라 달라진다.
 
-## 5. 미니 DBMS를 먼저 만들고 Redis 연결하기
+## 5. 미니 Redis 구현과 퍼즐 랭킹
 
-**DB**는 저장된 데이터, **DBMS**는 저장·조회·수정을 처리하는 소프트웨어, **SQL**은 관계형 DBMS에 요청을 표현하는 언어다. 여러 프로그램이 데이터를 찾고 함께 수정하거나 장애 뒤 복구하는 작업을 공통으로 처리하려고 DBMS가 발전했다. 1960년대 IBM IMS는 아폴로 부품 관리에 쓰였고, 1970년 에드거 코드의 관계형 모델은 물리적 저장 위치를 몰라도 데이터를 조회하는 바탕이 됐다.
+JavaScript와 Node.js도 검토했지만 최종 구현은 **Python 표준 라이브러리**를 사용했다. 키의 해시값으로 버킷을 고른다. 같은 버킷에 들어온 키는 목록에 함께 보관하고 실제 키를 비교한다(체이닝). 같은 키를 다시 저장하면 값을 덮어쓴다.
 
-관계형 DBMS는 보통 **SQL 해석 → 실행 계획 → 결과 반환** 순으로 조회한다. 인덱스는 필요한 행을 효율적으로 찾는 데 쓰인다. 트랜잭션은 주문 저장과 재고 차감처럼 함께 성공해야 하는 변경을 묶는다.
-
-미니 DBMS와 미니 Redis는 **JavaScript + Node.js**를 구현 후보로 잡았다. 과제 원문에 언어 또는 필수 기능 조건이 있다면 그 조건에 맞춘다.
-
-1. **미니 DBMS.** `id`, `name`, `price`를 가진 상품을 파일에 저장한다. ID 중복은 오류, `findById(42)`에 상품이 없으면 `null`로 정한다. 가격 수정 뒤 프로그램을 재시작해 새 가격을 다시 읽을 수 있는지 확인한다.
-2. **미니 Redis.** `Map`으로 `SET`, `GET`, `DEL`과 TTL을 구현한다. `redis-cli` 호환이 필요하면 TCP 서버에 RESP 요청·응답 처리를 추가한다.
-3. **백엔드에서 연결.** 캐시 미스가 나면 백엔드가 `findById(42)`를 호출하고 조회 결과를 Redis에 넣는다. 같은 상품을 두 번 조회하고 TTL이 지난 뒤 한 번 더 조회해, DBMS 호출이 첫 요청과 만료 후 요청에서 일어나는지 확인한다.
+- 잠금으로 저장·조회·삭제를 보호한다. 만료된 값은 조회 시 미스로 처리하고 주기적으로 정리한다.
+- 외부 프로그램은 `PUT /api/kv/{key}`, `GET /api/kv/{key}`, `DELETE /api/kv/{key}`를 호출한다. PUT은 JSON 값과 선택적인 `ttlSeconds`를 받는다. 이 구현은 HTTP JSON 방식이며, RESP, `redis-cli`, RDB/AOF는 지원하지 않는다.
+- 퍼즐 기록 원본은 [미니 DBMS 학습 노트](dbms-study-notes.md)의 파일 저장소에 남는다. 미니 Redis는 이름별 최고 기록 TOP 10 응답을 RAM에 보관한다.
 
 ```text
-구현 순서  미니 DBMS → 미니 Redis → 백엔드에서 연결
-조회 순서  백엔드 → Redis 먼저 확인 → 미스일 때 백엔드가 DBMS 조회
+랭킹 조회 → 앱 서버가 Redis 확인
+  히트 → 저장된 TOP 10 반환
+  미스 → 미니 DBMS 조회 → Redis에 30초 동안 저장 → 반환
 ```
+
+새 이름이 등록되거나 같은 이름의 최고 기록이 갱신되면 DBMS 저장이 끝난 뒤 기존 랭킹 캐시를 지운다. 캐시 키에 DB 테이블 버전이 들어가므로 삭제에 실패해도 다음 조회는 새 버전의 키를 사용한다. 기존 최고 기록을 유지하는 경우 캐시도 유지한다. Redis가 중단되면 앱은 DBMS에서 랭킹을 조회한다.
+
+## 6. 동작 확인과 성능
+
+1. 터미널 두 개에서 `npm run redis`와 `npm run dev`를 각각 실행한다.
+2. [퍼즐 페이지](http://127.0.0.1:4173)에서 **랭킹 새로고침**을 눌러 캐시를 채운다. 30초 안에 다시 누르면 [캐시 통계](http://127.0.0.1:4175/api/cache/stats)의 `hits`가 늘어난다.
+3. 캐시를 채운 시점부터 30초가 지난 뒤 다시 조회하면 `misses`가 늘고 DBMS에서 결과를 가져온다.
+
+`npm run test:redis`는 해시 충돌, TTL, 동시 접근, 최고 기록 갱신 시 캐시 무효화와 장애 시 DBMS 대체 조회를 확인한다.
+
+이전 로컬 벤치마크에서는 1,000건을 넣고 비교했다. 랭킹 100회 조회에서 **DB 조회는 100회 → 0회**로 줄었고, 평균 응답 시간은 **8.611ms → 26.217ms**로 늘었다. 이 환경에서는 별도 HTTP 호출과 JSON 처리 비용이 있었으며, 수치는 이번에 다시 측정하지 않았다. 재현 명령은 `npm run benchmark:redis`다.
 
 ## 참고 자료
 
 - [Redis 창시자 인터뷰](https://www.eu-startups.com/2011/01/an-interview-with-salvatore-sanfilippo-creator-of-redis-working-out-of-sicily/) · [Redis 소개](https://redis.io/tutorials/what-is-redis/)
 - [캐시 어사이드](https://redis.io/docs/latest/develop/use-cases/cache-aside/) · [INCR](https://redis.io/docs/latest/commands/incr/) · [RESP](https://redis.io/docs/latest/develop/reference/protocol-spec/) · [RDB와 AOF](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)
-- [IBM IMS 역사](https://www.ibm.com/history/information-management-system) · [관계형 모델](https://research.ibm.com/publications/a-relational-model-of-data-for-large-shared-data-banks) · [PostgreSQL 쿼리 처리](https://www.postgresql.org/docs/17/query-path.html)
-- [Node.js 파일 API](https://nodejs.org/api/fs.html) · [Node.js 네트워크 API](https://nodejs.org/api/net.html)
